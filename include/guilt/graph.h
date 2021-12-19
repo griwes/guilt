@@ -1,26 +1,24 @@
+#pragma oncinclude < compare>
+#include <iostream>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
-#include <cassert>
-#include <fstream>
-#include <iostream>
-
 namespace guilt
 {
+enum class edge_type
+{
+    depend,
+    flow,
+    fulfill
+};
+
 struct node_id
 {
     std::size_t id;
 
-    friend bool operator<(const node_id & lhs, const node_id & rhs)
-    {
-        return lhs.id < rhs.id;
-    }
-
-    friend bool operator==(const node_id & lhs, const node_id & rhs)
-    {
-        return lhs.id == rhs.id;
-    }
+    auto operator<=>(const node_id &) const = default;
 };
 
 struct node_id_hash
@@ -44,18 +42,20 @@ class dependency_cycle : std::exception
 {
 public:
     std::string to_graphviz() const;
+    std::string full_graph_graphviz() const;
 
 private:
     friend class dependency_graph;
 
-    dependency_cycle(const dependency_graph * graph, node_id from, node_id to)
-        : _graph{ graph }, _from{ from }, _to{ to }
+    dependency_cycle(const dependency_graph * graph, node_id from, node_id to, std::string label = "")
+        : _graph{ graph }, _from{ from }, _to{ to }, _label{ std::move(label) }
     {
     }
 
     const dependency_graph * _graph;
     node_id _from;
     node_id _to;
+    std::string _label;
 };
 
 class dependency_graph
@@ -92,15 +92,15 @@ public:
         return ret;
     }
 
-    void add_edge(node_id from, node_id to)
+    void add_edge(node_id from, node_id to, edge_type type = edge_type::depend, std::string label = "")
     {
         if (_check_for_cycle(from, to))
         {
-            throw dependency_cycle{ this, from, to };
+            throw dependency_cycle{ this, from, to, std::move(label) };
         }
 
-        auto e = edge{ from, to };
-        _edges.insert(std::upper_bound(_edges.begin(), _edges.end(), e), e);
+        auto e = edge{ from, to, type, std::move(label) };
+        _edges.insert(std::lower_bound(_edges.begin(), _edges.end(), e), e);
     }
 
     struct graph_filter_between
@@ -111,54 +111,10 @@ public:
 
     std::string to_graphviz() const
     {
-        std::string ret = _graphviz_header();
+        std::string ret;
 
-        for (auto && node : _nodes)
-        {
-            auto id_str = std::to_string(node.id.id);
-            ret += "    node_" + id_str + " [ label = \"" + node.name + " (#" + id_str + ")\n"
-                + node.description + "\" ];\n";
-        }
-
-        ret += "\n";
-
-        auto print_cluster = [&](auto && self, const cluster & c, std::string prefix) -> void {
-            auto id_str = std::to_string(c.id.id);
-
-            ret += prefix + "subgraph cluster_" + id_str + " {\n";
-            ret += prefix + "    label = \"" + c.name + " (#" + id_str + ")\n" + c.description + "\";\n\n";
-
-            for (auto && child : c.child_clusters)
-            {
-                self(self, _clusters.at(child.id), prefix + "    ");
-            }
-
-            for (auto && child : c.child_nodes)
-            {
-                ret += prefix + "    node_" + std::to_string(child.id) + ";\n";
-            }
-
-            ret += prefix + "}\n";
-        };
-
-        for (auto && cluster : _clusters)
-        {
-            if (cluster.parent)
-            {
-                continue;
-            }
-
-            print_cluster(print_cluster, cluster, "    ");
-        }
-
-        ret += "\n";
-
-        for (auto && edge : _edges)
-        {
-            ret +=
-                "    node_" + std::to_string(edge.from.id) + " -> node_" + std::to_string(edge.to.id) + ";\n";
-        }
-
+        ret += _graphviz_header();
+        ret += _generate_graphviz();
         ret += _graphviz_footer();
 
         return ret;
@@ -192,6 +148,77 @@ digraph {
         return "}";
     }
 
+    std::string _generate_graphviz() const
+    {
+        std::string ret;
+
+        for (auto && node : _nodes)
+        {
+            auto id_str = std::to_string(node.id.id);
+            ret += "    node_" + id_str + " [ label = \"" + node.name + " (#" + id_str + ")\n"
+                + node.description + "\" ];\n";
+        }
+
+        ret += "\n";
+
+        auto print_cluster = [&](auto && self, const cluster & c, std::string prefix) -> void
+        {
+            auto id_str = std::to_string(c.id.id);
+
+            ret += prefix + "subgraph cluster_" + id_str + " {\n";
+            ret += prefix + "    label = \"" + c.name + " (#" + id_str + ")"
+                + (c.description.empty() ? "" : "\\n") + c.description + "\";\n\n";
+
+            for (auto && child : c.child_clusters)
+            {
+                self(self, _clusters.at(child.id), prefix + "    ");
+            }
+
+            for (auto && child : c.child_nodes)
+            {
+                ret += prefix + "    node_" + std::to_string(child.id) + ";\n";
+            }
+
+            ret += prefix + "}\n";
+        };
+
+        for (auto && cluster : _clusters)
+        {
+            if (cluster.parent)
+            {
+                continue;
+            }
+
+            print_cluster(print_cluster, cluster, "    ");
+        }
+
+        ret += "\n";
+
+        for (auto && edge : _edges)
+        {
+            const char * style = nullptr;
+            switch (edge.type)
+            {
+                case edge_type::depend:
+                    style = "dir = \"back\"";
+                    break;
+
+                case edge_type::flow:
+                    style = "style = \"dashed\" arrowhead = \"dot\"";
+                    break;
+
+                case edge_type::fulfill:
+                    style = "arrowhead = \"vee\"";
+                    break;
+            }
+
+            ret += "    node_" + std::to_string(edge.from.id) + " -> node_" + std::to_string(edge.to.id)
+                + " [ " + style + " label = \"" + edge.label + "\" ];\n";
+        }
+
+        return ret;
+    }
+
     std::string _generate_graphviz(node_id_set filtered_node_ids) const
     {
         std::string ret;
@@ -205,7 +232,8 @@ digraph {
 
         ret += "\n";
 
-        auto print_cluster = [&](auto && self, const cluster & c, std::string prefix) -> void {
+        auto print_cluster = [&](auto && self, const cluster & c, std::string prefix) -> void
+        {
             auto id_str = std::to_string(c.id.id);
 
             ret += prefix + "subgraph cluster_" + id_str + " {\n";
@@ -244,8 +272,24 @@ digraph {
             if (filtered_node_ids.find(edge.from) != filtered_node_ids.end()
                 && filtered_node_ids.find(edge.to) != filtered_node_ids.end())
             {
+                const char * style = nullptr;
+                switch (edge.type)
+                {
+                    case edge_type::depend:
+                        style = "dir = \"back\"";
+                        break;
+
+                    case edge_type::flow:
+                        style = "style = \"dashed\" arrowhead = \"dot\"";
+                        break;
+
+                    case edge_type::fulfill:
+                        style = "arrowhead = \"vee\"";
+                        break;
+                }
+
                 ret += "    node_" + std::to_string(edge.from.id) + " -> node_" + std::to_string(edge.to.id)
-                    + ";\n";
+                    + " [ " + style + " label = \"" + edge.label + "\" ];\n";
             }
         }
 
@@ -257,7 +301,8 @@ digraph {
         node_id_set nodes_reachable_from_to{ to };
         node_id_set nodes_to_check{ to };
 
-        auto reachable_node = [&](node_id id) {
+        auto reachable_node = [&](node_id id)
+        {
             if (nodes_reachable_from_to.insert(id).second)
             {
                 nodes_to_check.insert(id);
@@ -271,9 +316,10 @@ digraph {
             nodes_to_check.erase(b);
 
             auto [begin, end] = std::equal_range(
-                _edges.begin(), _edges.end(), edge{ current_from, {} }, [](auto && lhs, auto && rhs) {
-                    return lhs.from.id < rhs.from.id;
-                });
+                _edges.begin(),
+                _edges.end(),
+                edge{ current_from, {} },
+                [](auto && lhs, auto && rhs) { return lhs.from.id < rhs.from.id; });
 
             while (begin != end)
             {
@@ -304,9 +350,10 @@ digraph {
             auto tail_id = path.back();
 
             auto [begin, end] = std::equal_range(
-                _edges.begin(), _edges.end(), edge{ tail_id, {} }, [](auto && lhs, auto && rhs) {
-                    return lhs.from.id < rhs.from.id;
-                });
+                _edges.begin(),
+                _edges.end(),
+                edge{ tail_id, {} },
+                [](auto && lhs, auto && rhs) { return lhs.from.id < rhs.from.id; });
 
             while (begin != end)
             {
@@ -331,22 +378,21 @@ digraph {
         node_id id;
         std::string name;
         std::string description;
+
+        auto operator<=>(const node & other) const
+        {
+            return id <=> other.id;
+        }
     };
 
     struct edge
     {
         node_id from;
         node_id to;
+        edge_type type;
+        std::string label;
 
-        friend bool operator<(const edge & lhs, const edge & rhs)
-        {
-            return lhs.from < rhs.from || lhs.to < rhs.to;
-        }
-
-        friend bool operator==(const edge & lhs, const edge & rhs)
-        {
-            return lhs.from == rhs.from && lhs.to == rhs.to;
-        }
+        auto operator<=>(const edge &) const = default;
     };
 
     struct cluster
@@ -371,10 +417,27 @@ inline std::string dependency_cycle::to_graphviz() const
 
     ret += _graph->_graphviz_header();
 
+    ret += "    node_" + std::to_string(_to.id) + " -> node_" + std::to_string(_from.id)
+        + " [ style = \"dashed\" color = \"red\" fontcolor = \"red\" constraint = \"false\" label = \""
+        + _label + "\" ];\n";
     ret += _graph->_generate_graphviz(
         _graph->_get_filtered_nodes(dependency_graph::graph_filter_between{ _from, _to }));
-    ret += "    node_" + std::to_string(_from.id) + " -> node_" + std::to_string(_to.id)
-        + " [ style = \"dashed\" color = \"red\" constraint = \"false\" ];\n";
+
+    ret += _graph->_graphviz_footer();
+
+    return ret;
+}
+
+inline std::string dependency_cycle::full_graph_graphviz() const
+{
+    std::string ret;
+
+    ret += _graph->_graphviz_header();
+
+    ret += "    node_" + std::to_string(_to.id) + " -> node_" + std::to_string(_from.id)
+        + " [ style = \"dashed\" color = \"red\" fontcolor = \"red\" constraint = \"false\" label = \""
+        + _label + "\" ];\n";
+    ret += _graph->_generate_graphviz();
 
     ret += _graph->_graphviz_footer();
 
