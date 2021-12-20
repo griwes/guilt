@@ -1,4 +1,5 @@
-#pragma oncinclude < compare>
+#pragma once
+#include <compare>
 #include <iostream>
 #include <optional>
 #include <string>
